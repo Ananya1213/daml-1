@@ -10,6 +10,9 @@ import com.daml.lf.value.Value
 import com.daml.lf.data.ImmArray
 import com.daml.lf.data.Trampoline.{Bounce, Land, Trampoline}
 
+import scala.collection.mutable
+import scala.annotation.tailrec
+
 private[lf] object NormalizeRollbacks {
 
   private[this] type Nid = NodeId
@@ -75,9 +78,8 @@ private[lf] object NormalizeRollbacks {
         //pass 1
         traverseNids(rootsOriginal.toList) { norms =>
           //pass 2
-          pushNorms(initialState, norms.toList) { (finalState, roots) =>
-            Land(GenTransaction(finalState.nodeMap, ImmArray(roots)))
-          }
+          val (finalState, roots) = pushNorms(initialState, norms)
+          Land(GenTransaction(finalState.nodeMap, roots))
         }.bounce
     }
   }
@@ -135,14 +137,11 @@ private[lf] object NormalizeRollbacks {
 
   private[this] case class State(index: Int, nodeMap: Map[Nid, Node]) {
 
-    def next[R](k: (State, Nid) => Trampoline[R]): Trampoline[R] = {
-      k(State(index + 1, nodeMap), NodeId(index))
-    }
+    def next: (State, Nid) =
+      (State(index + 1, nodeMap), NodeId(index))
 
-    def push[R](nid: Nid, node: Node)(k: (State, Nid) => Trampoline[R]): Trampoline[R] = {
-      k(State(index, nodeMap = nodeMap + (nid -> node)), nid)
-    }
-
+    def push(nid: Nid, node: Node): State =
+      State(index, nodeMap = nodeMap + (nid -> node))
   }
 
   // The `push*` functions convert the Canonical types to the tx being collected in State.
@@ -152,69 +151,65 @@ private[lf] object NormalizeRollbacks {
 
   private val initialState = State(0, Map.empty)
 
-  private def pushAct[R](s: State, x: Norm.Act)(k: (State, Nid) => Trampoline[R]): Trampoline[R] = {
-    Bounce { () =>
-      s.next { (s, me) =>
-        x match {
-          case Norm.Leaf(node) =>
-            s.push(me, node)(k)
-          case Norm.Exe(exe, subs) =>
-            pushNorms(s, subs) { (s, children) =>
-              val node = exe.copy(children = ImmArray(children))
-              s.push(me, node)(k)
-            }
-        }
-      }
-    }
-  }
+  private final case class ProcessingNode(
+      addNode: (State, ImmArray[Nid]) => State,
+      children: mutable.Builder[Nid, ImmArray[Nid]],
+      childrenTodo: Seq[Norm],
+  )
 
-  private def pushRoll[R](s: State, x: Norm.Roll)(
-      k: (State, Nid) => Trampoline[R]
-  ): Trampoline[R] = {
-    s.next { (s, me) =>
-      x match {
-        case Norm.Roll1(act) =>
-          pushAct(s, act) { (s, child) =>
-            val node = NodeRollback(children = ImmArray(List(child)))
-            s.push(me, node)(k)
+  @tailrec
+  private def go(s: State, xs: List[ProcessingNode]): State = xs match {
+    case Nil => s
+    case (node @ ProcessingNode(_, _, c +: cs)) :: xs =>
+      val (s2, nid) = s.next
+      val node2 = node.copy(children = node.children += nid, childrenTodo = cs)
+      c match {
+        case act: Norm.Act =>
+          act match {
+            case Norm.Leaf(node) => go(s2.push(nid, node), node2 :: xs)
+            case Norm.Exe(node, children) =>
+              val node3 = ProcessingNode(
+                (s, children) => s.push(nid, node.copy(children = children)),
+                ImmArray.newBuilder,
+                children,
+              )
+              go(s2, node3 :: node2 :: xs)
           }
-        case Norm.Roll2(h, m, t) =>
-          pushAct(s, h) { (s, hh) =>
-            pushNorms(s, m.toList) { (s, mm) =>
-              pushAct(s, t) { (s, tt) =>
-                val children = List(hh) ++ mm ++ List(tt)
-                val node = NodeRollback(children = ImmArray(children))
-                s.push(me, node)(k)
-              }
-            }
-          }
-      }
-    }
-  }
-
-  private def pushNorm[R](s: State, x: Norm)(k: (State, Nid) => Trampoline[R]): Trampoline[R] = {
-    x match {
-      case act: Norm.Act => pushAct(s, act)(k)
-      case roll: Norm.Roll => pushRoll(s, roll)(k)
-    }
-  }
-
-  private def pushNorms[R](s: State, xs: List[Norm])(
-      k: (State, List[Nid]) => Trampoline[R]
-  ): Trampoline[R] = {
-    Bounce { () =>
-      xs match {
-        case Nil => k(s, Nil)
-        case x :: xs =>
-          pushNorm(s, x) { (s, y) =>
-            pushNorms(s, xs) { (s, ys) =>
-              Bounce { () =>
-                k(s, y :: ys)
-              }
-            }
+        case roll: Norm.Roll =>
+          roll match {
+            case Norm.Roll1(act) =>
+              val node3 =
+                ProcessingNode((s, children) => s.push(nid, NodeRollback(children)), ImmArray.newBuilder, List(act))
+              go(s2, node3 :: node2 :: xs)
+            case Norm.Roll2(h, m, t) =>
+              val node3 = ProcessingNode(
+                (s, children) => s.push(nid, NodeRollback(children)),
+                ImmArray.newBuilder,
+                h +: m :+ t,
+              )
+              go(s2, node3 :: node2 :: xs)
           }
       }
-    }
+    case ProcessingNode(addNode, children, _) :: xs =>
+      go(addNode(s, children.result()), xs)
+  }
+
+  private def pushNorms(s: State, xs: Vector[Norm]): (State, ImmArray[Nid]) = {
+    var roots: ImmArray[Nid] = ImmArray.empty
+    val finalState = go(
+      s,
+      List(
+        ProcessingNode(
+          (s, children) => {
+            roots = children
+            s
+          },
+          ImmArray.newBuilder,
+          xs.toList,
+        )
+      ),
+    )
+    (finalState, roots)
   }
 
   // Types which ensure we can only represent the properly normalized cases.
