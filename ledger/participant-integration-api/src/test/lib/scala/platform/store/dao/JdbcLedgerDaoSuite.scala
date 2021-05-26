@@ -206,7 +206,8 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend {
     )
 
   private def exercise(
-      targetCid: ContractId
+      targetCid: ContractId,
+      key: Option[KeyWithMaintainers[LfValue[ContractId]]] = None,
   ): NodeExercises[NodeId, ContractId] =
     NodeExercises(
       targetCoid = targetCid,
@@ -221,7 +222,7 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend {
       choiceObservers = Set.empty,
       children = ImmArray.empty,
       exerciseResult = Some(someChoiceResult),
-      key = None,
+      key = key,
       byKey = false,
       version = TransactionVersion.minVersion,
     )
@@ -350,10 +351,11 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend {
   }
 
   protected def singleExercise(
-      targetCid: ContractId
+      targetCid: ContractId,
+      key: Option[KeyWithMaintainers[LfValue[ContractId]]] = None,
   ): (Offset, LedgerEntry.Transaction) = {
     val txBuilder = TransactionBuilder()
-    val nid = txBuilder.add(exercise(targetCid))
+    val nid = txBuilder.add(exercise(targetCid, key))
     val offset = nextOffset()
     val id = offset.toLong
     val let = Instant.now
