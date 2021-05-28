@@ -63,7 +63,7 @@ private[lf] object NormalizeRollbacks {
             go(rbNode :: prevNode :: ns)
           case exe : NodeExercises[_, _] =>
             val exeNode = TraverseNode(
-              children => Vector(Norm.Exe(exe, children.toList)),
+              children => Vector(Norm.Exe(exe, children.to(ImmArray))),
               children = Vector.empty,
               todo = FrontStack(exe.children))
             go(exeNode :: prevNode :: ns)
@@ -149,44 +149,47 @@ private[lf] object NormalizeRollbacks {
   private final case class ProcessingNode(
       addNode: (State, ImmArray[Nid]) => State,
       children: mutable.Builder[Nid, ImmArray[Nid]],
-      childrenTodo: Seq[Norm],
+      childrenTodo: FrontStack[Norm],
   )
 
   @tailrec
   private def go(s: State, xs: List[ProcessingNode]): State = xs match {
     case Nil => s
-    case (node @ ProcessingNode(_, _, c +: cs)) :: xs =>
-      val (s2, nid) = s.next
-      val node2 = node.copy(children = node.children += nid, childrenTodo = cs)
-      c match {
-        case act: Norm.Act =>
-          act match {
-            case Norm.Leaf(node) => go(s2.push(nid, node), node2 :: xs)
-            case Norm.Exe(node, children) =>
-              val node3 = ProcessingNode(
-                (s, children) => s.push(nid, node.copy(children = children)),
-                ImmArray.newBuilder,
-                children,
-              )
-              go(s2, node3 :: node2 :: xs)
-          }
-        case roll: Norm.Roll =>
-          roll match {
-            case Norm.Roll1(act) =>
-              val node3 =
-                ProcessingNode((s, children) => s.push(nid, NodeRollback(children)), ImmArray.newBuilder, List(act))
-              go(s2, node3 :: node2 :: xs)
-            case Norm.Roll2(h, m, t) =>
-              val node3 = ProcessingNode(
-                (s, children) => s.push(nid, NodeRollback(children)),
-                ImmArray.newBuilder,
-                h +: m :+ t,
-              )
-              go(s2, node3 :: node2 :: xs)
+    case (node @ ProcessingNode(addNode, children, cs)) :: xs =>
+      cs.pop match {
+        case None =>
+          go(addNode(s, children.result()), xs)
+        case Some((c, cs)) =>
+          val (s2, nid) = s.next
+          val node2 = node.copy(children = node.children += nid, childrenTodo = cs)
+          c match {
+            case act: Norm.Act =>
+              act match {
+                case Norm.Leaf(node) => go(s2.push(nid, node), node2 :: xs)
+                case Norm.Exe(node, children) =>
+                  val node3 = ProcessingNode(
+                    (s, children) => s.push(nid, node.copy(children = children)),
+                    ImmArray.newBuilder,
+                    FrontStack(children),
+                  )
+                  go(s2, node3 :: node2 :: xs)
+              }
+            case roll: Norm.Roll =>
+              roll match {
+                case Norm.Roll1(act) =>
+                  val node3 =
+                    ProcessingNode((s, children) => s.push(nid, NodeRollback(children)), ImmArray.newBuilder, FrontStack(act))
+                  go(s2, node3 :: node2 :: xs)
+                case Norm.Roll2(h, m, t) =>
+                  val node3 = ProcessingNode(
+                    (s, children) => s.push(nid, NodeRollback(children)),
+                    ImmArray.newBuilder,
+                    h +: m.to(ImmArray) ++: FrontStack(t),
+                  )
+                  go(s2, node3 :: node2 :: xs)
+              }
           }
       }
-    case ProcessingNode(addNode, children, _) :: xs =>
-      go(addNode(s, children.result()), xs)
   }
 
   private def pushNorms(s: State, xs: Vector[Norm]): (State, ImmArray[Nid]) = {
@@ -200,7 +203,7 @@ private[lf] object NormalizeRollbacks {
             s
           },
           ImmArray.newBuilder,
-          xs.toList,
+          FrontStack(xs),
         )
       ),
     )
@@ -217,7 +220,7 @@ private[lf] object NormalizeRollbacks {
       // A non-rollback tx/node
       sealed trait Act extends Norm
       final case class Leaf(node: LeafNode) extends Act
-      final case class Exe(node: ExeNode, children: List[Norm]) extends Act
+      final case class Exe(node: ExeNode, children: ImmArray[Norm]) extends Act
 
       // A *normalized* rollback tx/node. 2 cases:
       // - rollback containing a single non-rollback tx/node.
