@@ -8,7 +8,6 @@ import com.daml.lf.transaction.{NodeId, GenTransaction}
 import com.daml.lf.transaction.Node.{GenNode, NodeRollback, NodeExercises, LeafOnlyActionNode}
 import com.daml.lf.value.Value
 import com.daml.lf.data.ImmArray
-import com.daml.lf.data.Trampoline.{Bounce, Land, Trampoline}
 
 import scala.collection.mutable
 import scala.annotation.tailrec
@@ -38,50 +37,44 @@ private[lf] object NormalizeRollbacks {
     // The List is necessary because the rules can:
     // (1) drop nodes; (2) combine nodes (3) lift nodes from a lower level to a higher level.
 
-    txOriginal match {
-      case GenTransaction(nodesOriginal, rootsOriginal) =>
-        def traverseNids[R](xs: List[Nid])(k: Vector[Norm] => Trampoline[R]): Trampoline[R] = {
-          Bounce { () =>
-            xs match {
-              case Nil => k(Vector.empty)
-              case x :: xs =>
-                traverseNode(nodesOriginal(x)) { norms1 =>
-                  traverseNids(xs) { norms2 =>
-                    Bounce { () =>
-                      k(norms1 ++ norms2)
-                    }
-                  }
-                }
-            }
-          }
-        }
+    val GenTransaction(nodesOriginal, rootsOriginal) = txOriginal
 
-        def traverseNode[R](node: Node)(k: Vector[Norm] => Trampoline[R]): Trampoline[R] = {
-          Bounce { () =>
-            node match {
+    final case class TraverseNode(
+      wrap: Vector[Norm] => Vector[Norm],
+      children: Vector[Norm],
+      todo: List[Nid],
+    )
 
-              case NodeRollback(children) =>
-                traverseNids(children.toList) { norms =>
-                  makeRoll(norms)(k)
-                }
+    def go(ns: List[TraverseNode]): Vector[Norm] = ns match {
+      case Nil => Vector.empty
+      case TraverseNode(wrap, children, Nil) :: Nil => wrap(children)
+      case TraverseNode(wrap, children, Nil) :: n :: ns =>
+        go(n.copy(children = n.children ++ wrap(children)) :: ns)
+      case (n @ TraverseNode(_, _, t :: todo)) :: ns => nodesOriginal(t) match {
+        case NodeRollback(children) =>
+          val oldNode = n.copy(todo = todo)
+          val rbNode = TraverseNode(
+            children => makeRoll(children),
+            children = Vector.empty,
+            todo = children.toList)
+          go(rbNode :: oldNode :: ns)
+        case exe : NodeExercises[_, _] =>
+          val oldNode = n.copy(todo = todo)
+          val exeNode = TraverseNode(
+            children => Vector(Norm.Exe(exe, children.toList)),
+            children = Vector.empty,
+            todo = exe.children.toList)
+          go(exeNode :: oldNode :: ns)
+        case leaf: LeafOnlyActionNode[_] =>
+          go(n.copy(children = n.children :+ Norm.Leaf(leaf), todo = todo) :: ns)
+      }
 
-              case exe: NodeExercises[_, _] =>
-                traverseNids(exe.children.toList) { norms =>
-                  k(Vector(Norm.Exe(exe, norms.toList)))
-                }
-
-              case leaf: LeafOnlyActionNode[_] =>
-                k(Vector(Norm.Leaf(leaf)))
-            }
-          }
-        }
-        //pass 1
-        traverseNids(rootsOriginal.toList) { norms =>
-          //pass 2
-          val (finalState, roots) = pushNorms(initialState, norms)
-          Land(GenTransaction(finalState.nodeMap, roots))
-        }.bounce
     }
+    //pass 1
+    val norms = go(List(TraverseNode(identity, Vector.empty, rootsOriginal.toList)))
+    //pass 2
+    val (finalState, roots) = pushNorms(initialState, norms)
+    GenTransaction(finalState.nodeMap, roots)
   }
 
   // makeRoll: encodes the normalization transformation rules:
@@ -91,35 +84,35 @@ private[lf] object NormalizeRollbacks {
 
   //   rule #2/#3 overlap: ROLL [ ROLL [ xs… ] ] -> ROLL [ xs… ]
 
+  @tailrec
   private[this] def makeRoll[R](
-      norms: Vector[Norm]
-  )(k: Vector[Norm] => Trampoline[R]): Trampoline[R] = {
+    norms: Vector[Norm],
+    done: Vector[Norm] = Vector.empty,
+  ): Vector[Norm] = {
     caseNorms(norms) match {
       case Case.Empty =>
         // normalization rule #1
-        k(Vector.empty)
+        done
 
       case Case.Single(roll: Norm.Roll) =>
         // normalization rule #2/#3 overlap
-        k(Vector(roll))
+        done :+ roll
 
       case Case.Single(act: Norm.Act) =>
         // no rule
-        k(Vector(Norm.Roll1(act)))
+        done :+ Norm.Roll1(act)
 
       case Case.Multi(h: Norm.Roll, m, t) =>
         // normalization rule #2
-        makeRoll(m :+ t) { norms =>
-          k(h +: norms)
-        }
+        makeRoll(m :+ t, done :+ h)
 
       case Case.Multi(h: Norm.Act, m, t: Norm.Roll) =>
         // normalization rule #3
-        k(Vector(pushIntoRoll(h, m, t)))
+        done :+ pushIntoRoll(h, m, t)
 
       case Case.Multi(h: Norm.Act, m, t: Norm.Act) =>
         // no rule
-        k(Vector(Norm.Roll2(h, m, t)))
+        done :+ Norm.Roll2(h, m, t)
     }
   }
 
