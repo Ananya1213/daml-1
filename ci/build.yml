@@ -82,6 +82,7 @@ jobs:
       name: checkout_release
       condition: and(succeeded(), eq(variables.is_release, 'true'))
     - template: clean-up.yml
+    - template: write-job-metadata.yml
     - template: build-unix.yml
       parameters:
         release_tag: $(release_tag)
