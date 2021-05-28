@@ -7,7 +7,7 @@ package speedy
 import com.daml.lf.transaction.{NodeId, GenTransaction}
 import com.daml.lf.transaction.Node.{GenNode, NodeRollback, NodeExercises, LeafOnlyActionNode}
 import com.daml.lf.value.Value
-import com.daml.lf.data.{FrontStack, ImmArray}
+import com.daml.lf.data.{BackStack, FrontStack, ImmArray}
 
 import scala.collection.mutable
 import scala.annotation.tailrec
@@ -40,17 +40,17 @@ private[lf] object NormalizeRollbacks {
     val GenTransaction(nodesOriginal, rootsOriginal) = txOriginal
 
     final case class TraverseNode(
-      wrap: Vector[Norm] => Vector[Norm],
-      children: Vector[Norm],
+      wrap: BackStack[Norm] => BackStack[Norm],
+      children: BackStack[Norm],
       todo: FrontStack[Nid],
     )
 
-    def go(ns: List[TraverseNode]): Vector[Norm] = ns match {
-      case Nil => Vector.empty
+    def go(ns: List[TraverseNode]): BackStack[Norm] = ns match {
+      case Nil => BackStack.empty
       case (currentNode @ TraverseNode(wrap, children, todo)) :: ns => todo.pop match {
         case None => ns match {
           case Nil => wrap(children)
-          case n :: ns => go(n.copy(children = n.children ++ wrap(children)) :: ns)
+          case n :: ns => go(n.copy(children = n.children :++ wrap(children).toImmArray) :: ns)
         }
         case Some((t, todo)) =>
           val prevNode = currentNode.copy(todo = todo)
@@ -58,13 +58,13 @@ private[lf] object NormalizeRollbacks {
           case NodeRollback(children) =>
             val rbNode = TraverseNode(
               children => makeRoll(children),
-              children = Vector.empty,
+              children = BackStack.empty,
               todo = FrontStack(children))
             go(rbNode :: prevNode :: ns)
           case exe : NodeExercises[_, _] =>
             val exeNode = TraverseNode(
-              children => Vector(Norm.Exe(exe, children.to(ImmArray))),
-              children = Vector.empty,
+              children => BackStack(Norm.Exe(exe, children.toImmArray)),
+              children = BackStack.empty,
               todo = FrontStack(exe.children))
             go(exeNode :: prevNode :: ns)
           case leaf: LeafOnlyActionNode[_] =>
@@ -73,7 +73,7 @@ private[lf] object NormalizeRollbacks {
       }
     }
     //pass 1
-    val norms = go(List(TraverseNode(identity, Vector.empty, FrontStack(rootsOriginal))))
+    val norms = go(List(TraverseNode(identity, BackStack.empty, FrontStack(rootsOriginal))))
     //pass 2
     val (finalState, roots) = pushNorms(initialState, norms)
     GenTransaction(finalState.nodeMap, roots)
@@ -88,10 +88,10 @@ private[lf] object NormalizeRollbacks {
 
   @tailrec
   private[this] def makeRoll[R](
-    norms: Vector[Norm],
-    done: Vector[Norm] = Vector.empty,
-  ): Vector[Norm] = {
-    caseNorms(norms) match {
+    norms: BackStack[Norm],
+    done: BackStack[Norm] = BackStack.empty,
+  ): BackStack[Norm] = {
+    caseNorms(norms.toImmArray.toSeq.to(Vector)) match {
       case Case.Empty =>
         // normalization rule #1
         done
@@ -106,7 +106,7 @@ private[lf] object NormalizeRollbacks {
 
       case Case.Multi(h: Norm.Roll, m, t) =>
         // normalization rule #2
-        makeRoll(m :+ t, done :+ h)
+        makeRoll(BackStack(m) :+ t, done :+ h)
 
       case Case.Multi(h: Norm.Act, m, t: Norm.Roll) =>
         // normalization rule #3
@@ -192,7 +192,7 @@ private[lf] object NormalizeRollbacks {
       }
   }
 
-  private def pushNorms(s: State, xs: Vector[Norm]): (State, ImmArray[Nid]) = {
+  private def pushNorms(s: State, xs: BackStack[Norm]): (State, ImmArray[Nid]) = {
     var roots: ImmArray[Nid] = ImmArray.empty
     val finalState = go(
       s,
@@ -203,7 +203,7 @@ private[lf] object NormalizeRollbacks {
             s
           },
           ImmArray.newBuilder,
-          FrontStack(xs),
+          xs.toFrontStack,
         )
       ),
     )
