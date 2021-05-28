@@ -7,7 +7,7 @@ package speedy
 import com.daml.lf.transaction.{NodeId, GenTransaction}
 import com.daml.lf.transaction.Node.{GenNode, NodeRollback, NodeExercises, LeafOnlyActionNode}
 import com.daml.lf.value.Value
-import com.daml.lf.data.ImmArray
+import com.daml.lf.data.{FrontStack, ImmArray}
 
 import scala.collection.mutable
 import scala.annotation.tailrec
@@ -42,36 +42,38 @@ private[lf] object NormalizeRollbacks {
     final case class TraverseNode(
       wrap: Vector[Norm] => Vector[Norm],
       children: Vector[Norm],
-      todo: List[Nid],
+      todo: FrontStack[Nid],
     )
 
     def go(ns: List[TraverseNode]): Vector[Norm] = ns match {
       case Nil => Vector.empty
-      case TraverseNode(wrap, children, Nil) :: Nil => wrap(children)
-      case TraverseNode(wrap, children, Nil) :: n :: ns =>
-        go(n.copy(children = n.children ++ wrap(children)) :: ns)
-      case (n @ TraverseNode(_, _, t :: todo)) :: ns => nodesOriginal(t) match {
-        case NodeRollback(children) =>
-          val oldNode = n.copy(todo = todo)
-          val rbNode = TraverseNode(
-            children => makeRoll(children),
-            children = Vector.empty,
-            todo = children.toList)
-          go(rbNode :: oldNode :: ns)
-        case exe : NodeExercises[_, _] =>
-          val oldNode = n.copy(todo = todo)
-          val exeNode = TraverseNode(
-            children => Vector(Norm.Exe(exe, children.toList)),
-            children = Vector.empty,
-            todo = exe.children.toList)
-          go(exeNode :: oldNode :: ns)
-        case leaf: LeafOnlyActionNode[_] =>
-          go(n.copy(children = n.children :+ Norm.Leaf(leaf), todo = todo) :: ns)
+      case (currentNode @ TraverseNode(wrap, children, todo)) :: ns => todo.pop match {
+        case None => ns match {
+          case Nil => wrap(children)
+          case n :: ns => go(n.copy(children = n.children ++ wrap(children)) :: ns)
+        }
+        case Some((t, todo)) =>
+          val prevNode = currentNode.copy(todo = todo)
+          nodesOriginal(t) match {
+          case NodeRollback(children) =>
+            val rbNode = TraverseNode(
+              children => makeRoll(children),
+              children = Vector.empty,
+              todo = FrontStack(children))
+            go(rbNode :: prevNode :: ns)
+          case exe : NodeExercises[_, _] =>
+            val exeNode = TraverseNode(
+              children => Vector(Norm.Exe(exe, children.toList)),
+              children = Vector.empty,
+              todo = FrontStack(exe.children))
+            go(exeNode :: prevNode :: ns)
+          case leaf: LeafOnlyActionNode[_] =>
+            go(prevNode.copy(children = prevNode.children :+ Norm.Leaf(leaf)) :: ns)
       }
-
+      }
     }
     //pass 1
-    val norms = go(List(TraverseNode(identity, Vector.empty, rootsOriginal.toList)))
+    val norms = go(List(TraverseNode(identity, Vector.empty, FrontStack(rootsOriginal))))
     //pass 2
     val (finalState, roots) = pushNorms(initialState, norms)
     GenTransaction(finalState.nodeMap, roots)
