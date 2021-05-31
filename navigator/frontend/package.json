@@ -91,8 +91,11 @@
     "whatwg-fetch": "^3.5.0"
   },
   "resolutions": {
-    "**/elliptic": "^6.5.3",
+    "**/elliptic": "^6.5.4",
     "**/jpeg-js": "^0.4.1",
-    "**/selfsigned": "^1.10.8"
+    "**/selfsigned": "^1.10.8",
+    "**/ssri": "^8.0.1",
+    "**/hosted-git-info": "^4.0.2",
+    "**/multicast-dns": "^7.2.3"
   }
 }
