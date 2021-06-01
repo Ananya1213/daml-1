@@ -9,7 +9,7 @@
     "**/bl": "^4.0.3"
   },
   "dependencies": {
-    "bower": "1.8.8",
+    "bower": "1.8.12",
     "color-convert": "2.0.1",
     "colors": "1.4.0",
     "coffeescript": "^2.5.1",
