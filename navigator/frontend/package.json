@@ -61,7 +61,7 @@
     "webpack-dev-server": "^3.11.0"
   },
   "dependencies": {
-    "@apollo/client": "^3.3.2",
+    "@apollo/client": "^3.4.0",
     "babel-standalone": "^6.26.0",
     "color": "^3.0.1",
     "deep-equal": "^2.0.5",
