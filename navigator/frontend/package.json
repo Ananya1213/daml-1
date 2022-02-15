@@ -70,7 +70,7 @@
     "graphql": "^15.4.0",
     "jpeg-js": "^0.4.1",
     "lodash": "^4.17.19",
-    "modernizr": "^3.11.4",
+    "modernizr": "^3.12.0",
     "moment": "^2.23.0",
     "normalize.css": "^8.0.1",
     "react": "^17.0.1",
